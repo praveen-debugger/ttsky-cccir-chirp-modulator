@@ -3,67 +3,124 @@
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, Timer, RisingEdge, ReadOnly
+from cocotb.triggers import Timer, RisingEdge, ClockCycles
 
 
-async def wait_done_low(dut):
-    while True:
-        await RisingEdge(dut.clk)
-        await ReadOnly()
-        val = dut.uio_out[0].value
-        if val.is_resolvable:
-            if val.integer == 0:
-                break
+# ============================================================
+# UART DRIVER CLASS
+# ============================================================
+class UARTDriver:
+    def __init__(self, dut, signal, baud=9600):
+        self.dut = dut
+        self.signal = signal
+        self.bit_time_ns = int(1e9 / baud)
+
+    def _set_bit(self, bit):
+        """Modify only bit[0] of ui_in safely"""
+        val = self.signal.value.integer
+        if bit:
+            val |= (1 << 0)
         else:
-            await Timer(200, units="ns")
+            val &= ~(1 << 0)
+        self.signal.value = val
+
+    async def send_byte(self, byte):
+        """Send one UART byte (8N1)"""
+        self.dut._log.info(f"UART TX: Sending 0x{byte:02X}")
+
+        # Start bit
+        self._set_bit(0)
+        await Timer(self.bit_time_ns, units="ns")
+
+        # Data bits (LSB first)
+        for i in range(8):
+            bit_val = (byte >> i) & 1
+            self._set_bit(bit_val)
+            self.dut._log.info(f"Bit {i}: {bit_val}")
+            await Timer(self.bit_time_ns, units="ns")
+
+        # Stop bit
+        self._set_bit(1)
+        await Timer(self.bit_time_ns, units="ns")
 
 
+# ============================================================
+# MONITOR (Optional – observe chirp output)
+# ============================================================
+async def monitor_output(dut, duration_us=2000):
+    """Capture output waveform"""
+    samples = []
+    cycles = int((duration_us * 1000) / 100)  # 10 MHz clock
+
+    for _ in range(cycles):
+        await RisingEdge(dut.clk)
+        samples.append(int(dut.uo_out.value))
+
+    dut._log.info(f"Captured {len(samples)} samples")
+    return samples
+
+
+# ============================================================
+# MAIN TEST
+# ============================================================
 @cocotb.test()
-async def test_uart_behavior(dut):
-    dut._log.info("Starting test...")
+async def test_uart_chirp(dut):
 
-     
-    dut.rst_n.value = 1
-    dut._log.info("assert ui_in = 1")
-    dut.ui_in.value = 1  # UART idle (high)
-    
-    # Clock setup: 10 MHz = 100 ns period
+    dut._log.info("===== START TEST =====")
+
+    # --------------------------------------------------------
+    # Clock: 10 MHz
+    # --------------------------------------------------------
     clock = Clock(dut.clk, 100, units="ns")
     cocotb.start_soon(clock.start())
-    await ClockCycles(dut.clk, 2)
-    
-    #Reset
-    dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 5)
+
+    # --------------------------------------------------------
+    # Initialize inputs
+    # --------------------------------------------------------
+    dut.ui_in.value = 0xFF   # UART idle = HIGH
     dut.rst_n.value = 1
+
     await ClockCycles(dut.clk, 5)
-    
-    # UART transmission of 0x01 directly inlined
-    bit_time_ns = 104160
-    byte = 0xAA
 
-    dut._log.info("Start UART send routine")
+    # --------------------------------------------------------
+    # Reset
+    # --------------------------------------------------------
+    dut._log.info("Applying Reset")
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 10)
+    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 10)
 
-    # Start bit
-    dut._log.info("set start bit to 0")
-    dut.ui_in[0].value = 0
-    await Timer(bit_time_ns, units="ns")
+    # --------------------------------------------------------
+    # UART Driver
+    # --------------------------------------------------------
+    uart = UARTDriver(dut, dut.ui_in, baud=9600)
 
-    # Data bits (LSB first)
-    for i in range(8):
-        bit_val = (byte >> i) & 1
-        dut.ui_in[0].value = bit_val
-        dut._log.info(f"write bit {i} = {bit_val}")
-        await Timer(bit_time_ns, units="ns")
+    # --------------------------------------------------------
+    # Send Test Byte
+    # --------------------------------------------------------
+    test_byte = 0xAA
+    await uart.send_byte(test_byte)
 
-    # Stop bit
-    dut._log.info("set stop bit to 1")
-    dut.ui_in[0].value = 1
-    await Timer(bit_time_ns, units="ns")
+    # --------------------------------------------------------
+    # Wait for chirp generation
+    # --------------------------------------------------------
+    await Timer(3000, units="us")
 
-    await Timer(2500, units="us")
-    
-    # Optional: wait for done
-    # await wait_done_low(dut)
+    # --------------------------------------------------------
+    # Capture output
+    # --------------------------------------------------------
+    samples = await monitor_output(dut, duration_us=2000)
 
-    dut._log.info("Test completed.")
+    # --------------------------------------------------------
+    # Basic Checks (sanity)
+    # --------------------------------------------------------
+    assert len(samples) > 0, "No output samples captured!"
+
+    unique_vals = set(samples)
+    dut._log.info(f"Unique output values: {len(unique_vals)}")
+
+    assert len(unique_vals) > 1, "Output is not changing → chirp not generated!"
+
+    dut._log.info("===== TEST PASSED =====")
+
