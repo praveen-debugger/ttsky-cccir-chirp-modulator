@@ -1,70 +1,78 @@
-# SPDX-FileCopyrightText: © 2024 Tiny Tapeout
-# SPDX-License-Identifier: Apache-2.0
-
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, Timer, RisingEdge, ReadOnly
+from cocotb.triggers import Timer
 
 
-async def wait_done_low(dut):
-    while True:
-        await RisingEdge(dut.clk)
-        await ReadOnly()
-        val = dut.uio_out[0].value
-        if val.is_resolvable:
-            if val.integer == 0:
-                break
+CLK_PERIOD_NS = 100        # 10 MHz clock
+UART_BIT_TIME_US = 1000    # 1 ms per bit (adjust if needed)
+
+
+async def uart_send_byte(dut, data):
+    """Send one UART byte (8N1 format) on ui_in[0]"""
+
+    cocotb.log.info(f"Sending byte: {data:#010b}")
+
+    # Ensure other bits = 0, only bit0 used
+    bus_val = 0
+
+    # Start bit (0)
+    cocotb.log.info("UART START bit")
+    bus_val = 0b00000000
+    dut.ui_in.value = bus_val
+    await Timer(UART_BIT_TIME_US, unit="us")
+
+    # Data bits (LSB first)
+    for i in range(8):
+        bit = (data >> i) & 1
+        cocotb.log.info(f"UART DATA bit {i}: {bit}")
+
+        if bit == 1:
+            bus_val = 0b00000001
         else:
-            await Timer(200, units="ns")
+            bus_val = 0b00000000
+
+        dut.ui_in.value = bus_val
+        await Timer(UART_BIT_TIME_US, unit="us")
+
+    # Stop bit (1)
+    cocotb.log.info("UART STOP bit")
+    dut.ui_in.value = 0b00000001
+    await Timer(UART_BIT_TIME_US, unit="us")
 
 
 @cocotb.test()
 async def test_uart_behavior(dut):
-    dut._log.info("Starting test...")
+    """Main UART test"""
 
-     
-    dut.rst_n.value = 1
-    dut._log.info("assert ui_in = 1")
-    dut.ui_in.value = 1  # UART idle (high)
-    
-    # Clock setup: 10 MHz = 100 ns period
-    clock = Clock(dut.clk, 100, units="ns")
+    cocotb.log.info("Starting test...")
+
+    # Start clock
+    clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
-    await ClockCycles(dut.clk, 2)
-    
-    #Reset
+
+    # Reset sequence
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 5)
+    dut.ui_in.value = 0
+    await Timer(500, unit="ns")
+
     dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 5)
-    
-    # UART transmission of 0x01 directly inlined
-    bit_time_ns = 104160
-    byte = 0xAA
+    await Timer(500, unit="ns")
 
-    dut._log.info("Start UART send routine")
+    cocotb.log.info("Reset done")
 
-    # Start bit
-    dut._log.info("set start bit to 0")
-    dut.ui_in[0].value = 0
-    await Timer(bit_time_ns, units="ns")
+    # Idle line (UART idle = 1)
+    dut.ui_in.value = 0b00000001
+    await Timer(2000, unit="ns")
 
-    # Data bits (LSB first)
-    for i in range(8):
-        bit_val = (byte >> i) & 1
-        dut.ui_in[0].value = bit_val
-        dut._log.info(f"write bit {i} = {bit_val}")
-        await Timer(bit_time_ns, units="ns")
+    # Send test bytes
+    cocotb.log.info("Start UART send routine")
 
-    # Stop bit
-    dut._log.info("set stop bit to 1")
-    dut.ui_in[0].value = 1
-    await Timer(bit_time_ns, units="ns")
+    await uart_send_byte(dut, 0x55)   # 01010101 (good test pattern)
+    await uart_send_byte(dut, 0xA3)
+    await uart_send_byte(dut, 0x7F)
 
-    await Timer(2500, units="us")
-    
-    # Optional: wait for done
-    # await wait_done_low(dut)
+    # Wait for DUT processing (chirp generation etc.)
+    cocotb.log.info("Waiting for DUT response...")
+    await Timer(5, unit="ms")
 
-    dut._log.info("Test completed.")
-
+    cocotb.log.info("Test completed")
