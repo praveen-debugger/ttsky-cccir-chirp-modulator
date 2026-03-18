@@ -3,38 +3,67 @@
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import ClockCycles, Timer, RisingEdge, ReadOnly
+
+
+async def wait_done_low(dut):
+    while True:
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        val = dut.uio_out[0].value
+        if val.is_resolvable:
+            if val.integer == 0:
+                break
+        else:
+            await Timer(200, units="ns")
 
 
 @cocotb.test()
-async def test_project(dut):
-    dut._log.info("Start")
+async def test_uart_behavior(dut):
+    dut._log.info("Starting test...")
 
-    # Set the clock period to 10 us (100 KHz)
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-
-    # Reset
-    dut._log.info("Reset")
-    dut.ena.value = 1
-    dut.ui_in.value = 0
-    dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 10)
+     
     dut.rst_n.value = 1
+    dut._log.info("assert ui_in = 1")
+    dut.ui_in.value = 1  # UART idle (high)
+    
+    # Clock setup: 10 MHz = 100 ns period
+    clock = Clock(dut.clk, 100, units="ns")
+    cocotb.start_soon(clock.start())
+    await ClockCycles(dut.clk, 2)
+    
+    #Reset
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 5)
+    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 5)
+    
+    # UART transmission of 0x01 directly inlined
+    bit_time_ns = 104160
+    byte = 0xAA
 
-    dut._log.info("Test project behavior")
+    dut._log.info("Start UART send routine")
 
-    # Set the input values you want to test
-    dut.ui_in.value = 20
-    dut.uio_in.value = 30
+    # Start bit
+    dut._log.info("set start bit to 0")
+    dut.ui_in[0].value = 0
+    await Timer(bit_time_ns, units="ns")
 
-    # Wait for one clock cycle to see the output values
-    await ClockCycles(dut.clk, 1)
+    # Data bits (LSB first)
+    for i in range(8):
+        bit_val = (byte >> i) & 1
+        dut.ui_in[0].value = bit_val
+        dut._log.info(f"write bit {i} = {bit_val}")
+        await Timer(bit_time_ns, units="ns")
 
-    # The following assersion is just an example of how to check the output values.
-    # Change it to match the actual expected output of your module:
-    assert dut.uo_out.value == 50
+    # Stop bit
+    dut._log.info("set stop bit to 1")
+    dut.ui_in[0].value = 1
+    await Timer(bit_time_ns, units="ns")
 
-    # Keep testing the module by changing the input values, waiting for
-    # one or more clock cycles, and asserting the expected output values.
+    await Timer(2500, units="us")
+    
+    # Optional: wait for done
+    # await wait_done_low(dut)
+
+    dut._log.info("Test completed.")
