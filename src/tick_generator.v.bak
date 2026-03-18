@@ -1,0 +1,44 @@
+// tick_generator_min.v
+// Area-optimized tick generator for TinyTapeout
+// Generates a 1-cycle-wide pulse at specified BW rate from 10 MHz clock
+
+module tick_generator_min #(
+    parameter BW_BITWIDTH = 2,
+    parameter DIVIDER_BITWIDTH = 7
+)(
+    input  wire                  i_clk,
+    input  wire                  i_rst_n,
+    input  wire [BW_BITWIDTH-1:0] i_bw_config,    // 00:125kHz, 01:250kHz, 10:500kHz
+    output reg                   o_sample_tick_n
+);
+
+    // --------------------------------------------------------------------------
+    // Divider selection based on BW config (for 10 MHz clock)
+    // --------------------------------------------------------------------------
+    wire [DIVIDER_BITWIDTH-1:0] w_divider_val =
+        (i_bw_config == 2'd0) ? 7'd80 :  // 125kHz
+        (i_bw_config == 2'd1) ? 7'd40 :  // 250kHz
+        (i_bw_config == 2'd2) ? 7'd20 :  // 500kHz
+                                7'd80;   // default 125kHz
+
+    reg [DIVIDER_BITWIDTH-1:0] r_counter;
+
+    // --------------------------------------------------------------------------
+    // Counter & 1-cycle tick output (active low)
+    // --------------------------------------------------------------------------
+    always @(posedge i_clk or negedge i_rst_n) begin
+        if (!i_rst_n) begin
+            r_counter        <= 0;
+            o_sample_tick_n  <= 1'b1;  // inactive
+        end else begin
+            if (r_counter == w_divider_val - 1) begin
+                r_counter        <= 0;
+                o_sample_tick_n  <= 1'b0;  // active low tick
+            end else begin
+                r_counter        <= r_counter + 1;
+                o_sample_tick_n  <= 1'b1;  // inactive
+            end
+        end
+    end
+
+endmodule
